@@ -45,8 +45,33 @@ const DIP_API_KEY =
 
 
 // ============================================================
-// ALLGEMEINE HTTP-HILFSFUNKTION
+// URL- UND HTTP-HILFSFUNKTIONEN
 // ============================================================
+
+function buildUrl(
+  base: string,
+  path: string,
+): URL {
+  // Wichtig für Basen mit Pfadanteil, insbesondere:
+  // https://search.dip.bundestag.de/api/v1
+  //
+  // new URL("/drucksache", base) würde /api/v1 verwerfen.
+  // Deshalb Basis immer mit "/" abschließen und führende
+  // Slashes des relativen Pfades entfernen.
+  const normalizedBase =
+    base.endsWith("/")
+      ? base
+      : `${base}/`
+
+  const normalizedPath =
+    path.replace(/^\/+/, "")
+
+  return new URL(
+    normalizedPath,
+    normalizedBase,
+  )
+}
+
 
 async function getJson(
   base: string,
@@ -57,9 +82,8 @@ async function getJson(
   > = {},
   headers: Record<string, string> = {},
 ): Promise<any> {
-
   const url =
-    new URL(path, base)
+    buildUrl(base, path)
 
   for (
     const [key, value]
@@ -141,7 +165,6 @@ function toolResult(
 function toolError(
   error: unknown,
 ) {
-
   const message =
     error instanceof Error
       ? error.message
@@ -167,7 +190,6 @@ function toolError(
 
 function zpoBlogHeaders():
   Record<string, string> {
-
   if (!ZPOBLOG_API_KEY) {
     return {}
   }
@@ -181,7 +203,6 @@ function zpoBlogHeaders():
 
 function dipHeaders():
   Record<string, string> {
-
   if (!DIP_API_KEY) {
     return {}
   }
@@ -197,7 +218,7 @@ function dipHeaders():
 // BGH-DATEN AUFBEREITEN
 // ============================================================
 //
-// BGHeute ist Rechercheindex.
+// BGHeute ist ein privater Rechercheindex.
 // Etwaige KI-Zusammenfassungen werden bewusst entfernt.
 //
 
@@ -205,7 +226,6 @@ function slimBghDecision(
   decision: any,
   previewCharacters = 2000,
 ) {
-
   if (
     !decision ||
     typeof decision !== "object"
@@ -229,8 +249,7 @@ function slimBghDecision(
     ...rest,
 
     urteilstextPreview:
-      text.length >
-        previewCharacters
+      text.length > previewCharacters
         ? text.slice(
             0,
             previewCharacters,
@@ -241,8 +260,7 @@ function slimBghDecision(
       text.length,
 
     urteilstextTruncated:
-      text.length >
-      previewCharacters,
+      text.length > previewCharacters,
   }
 }
 
@@ -250,7 +268,6 @@ function slimBghDecision(
 function slimBghPayload(
   data: any,
 ) {
-
   if (
     !data ||
     typeof data !== "object"
@@ -284,7 +301,6 @@ function fullBghDecision(
   decision: any,
   maxCharacters: number,
 ) {
-
   if (
     !decision ||
     typeof decision !== "object"
@@ -308,8 +324,7 @@ function fullBghDecision(
     ...rest,
 
     urteilstext:
-      text.length >
-        maxCharacters
+      text.length > maxCharacters
         ? text.slice(
             0,
             maxCharacters,
@@ -320,8 +335,7 @@ function fullBghDecision(
       text.length,
 
     truncated:
-      text.length >
-      maxCharacters,
+      text.length > maxCharacters,
   }
 }
 
@@ -334,7 +348,6 @@ function truncateDipText(
   data: any,
   maxCharacters: number,
 ) {
-
   if (
     !data ||
     typeof data !== "object"
@@ -355,8 +368,7 @@ function truncateDipText(
     ...data,
 
     text:
-      text.length >
-        maxCharacters
+      text.length > maxCharacters
         ? text.slice(
             0,
             maxCharacters,
@@ -367,8 +379,7 @@ function truncateDipText(
       text.length,
 
     truncated:
-      text.length >
-      maxCharacters,
+      text.length > maxCharacters,
   }
 }
 
@@ -380,7 +391,6 @@ function truncateDipText(
 function cleanPlainText(
   text: string,
 ): string {
-
   return text
     .replace(
       /\u00a0/g,
@@ -402,14 +412,13 @@ function cleanPlainText(
 }
 
 
-function normalizeParagraph(
+function normalizeProvision(
   value: string,
 ): string {
-
   return value
     .trim()
     .replace(
-      /^§\s*/,
+      /^(?:§|Art\.?|Artikel)\s*/i,
       "",
     )
 }
@@ -420,12 +429,11 @@ async function fetchBuzerNorm(
   paragraphInput: string,
   maxCharacters: number,
 ) {
-
   const gesetz =
     gesetzInput.trim()
 
   const paragraph =
-    normalizeParagraph(
+    normalizeProvision(
       paragraphInput,
     )
 
@@ -443,7 +451,7 @@ async function fetchBuzerNorm(
       .test(paragraph)
   ) {
     throw new Error(
-      "Ungültiger Paragraph. Beispiel: 139 oder 130a.",
+      "Ungültiger Paragraph oder Artikel. Beispiel: 139, 130a oder 44.",
     )
   }
 
@@ -513,21 +521,30 @@ async function fetchBuzerNorm(
   const headings =
     Array.from(
       dom.querySelectorAll(
-        "h3",
+        "h1,h2,h3,h4",
       ),
-    )
+    ) as any[]
 
-  const headingPrefix =
-    `§ ${paragraph}`
+  const possiblePrefixes = [
+    `§ ${paragraph}`,
+    `Art. ${paragraph}`,
+    `Art ${paragraph}`,
+    `Artikel ${paragraph}`,
+  ]
 
   const heading =
     headings.find(
-      (node) =>
-        cleanPlainText(
-          node.textContent ?? "",
-        ).startsWith(
-          headingPrefix,
-        ),
+      (node) => {
+        const text =
+          cleanPlainText(
+            node.textContent ?? "",
+          )
+
+        return possiblePrefixes.some(
+          (prefix) =>
+            text.startsWith(prefix),
+        )
+      },
     )
 
   const headingText =
@@ -545,14 +562,12 @@ async function fetchBuzerNorm(
   let normText = ""
 
   if (headingText) {
-
     const start =
       bodyText.indexOf(
         headingText,
       )
 
     if (start >= 0) {
-
       const fromHeading =
         bodyText.slice(start)
 
@@ -561,6 +576,7 @@ async function fetchBuzerNorm(
         "\nFrühere Fassungen",
         "\nZitierungen von",
         "\nÄnderungen überwachen",
+        "\nLink zu dieser Seite",
       ]
 
       const endings =
@@ -603,8 +619,7 @@ async function fetchBuzerNorm(
     normText.length
 
   const returnedText =
-    normText.length >
-      maxCharacters
+    normText.length > maxCharacters
       ? normText.slice(
           0,
           maxCharacters,
@@ -632,8 +647,7 @@ async function fetchBuzerNorm(
     totalCharacters,
 
     truncated:
-      totalCharacters >
-      maxCharacters,
+      totalCharacters > maxCharacters,
 
     warning:
       "buzer.de ist keine amtliche Rechtsquelle. " +
@@ -650,7 +664,6 @@ async function fetchBuzerNorm(
 const handler =
   createMcpHandler(
     () => {
-
       const server =
         new McpServer(
           {
@@ -658,7 +671,7 @@ const handler =
               "zivilrichter-mcp",
 
             version:
-              "0.5.0",
+              "0.6.0",
           },
           {
             instructions: `
@@ -760,9 +773,7 @@ verifizierter Entscheidungsinhalt zu behandeln.
         },
 
         async () => {
-
           try {
-
             const result =
               await getJson(
                 LANDESRECHT_BASE,
@@ -774,7 +785,6 @@ verifizierter Entscheidungsinhalt zu behandeln.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -801,7 +811,6 @@ abgerufen werden.
 
           inputSchema:
             z.object({
-
               query:
                 z.string()
                   .min(1)
@@ -844,9 +853,7 @@ abgerufen werden.
           maxResults,
           page,
         }) => {
-
           try {
-
             const result =
               await getJson(
                 LANDESRECHT_BASE,
@@ -864,7 +871,6 @@ abgerufen werden.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -889,7 +895,6 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
 
           inputSchema:
             z.object({
-
               id:
                 z.string()
                   .min(1)
@@ -921,9 +926,7 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
           docPart,
           maxCharacters,
         }) => {
-
           try {
-
             const result =
               await getJson(
                 LANDESRECHT_BASE,
@@ -940,7 +943,6 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -970,9 +972,7 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
         },
 
         async () => {
-
           try {
-
             const result =
               await getJson(
                 ZPOBLOG_BASE,
@@ -984,7 +984,6 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -1014,7 +1013,6 @@ Autor und Beitragsdatum geladen.
 
           inputSchema:
             z.object({
-
               query:
                 z.string()
                   .min(2)
@@ -1070,9 +1068,7 @@ Autor und Beitragsdatum geladen.
           includeFullText,
           maxFullTextCharacters,
         }) => {
-
           try {
-
             const result =
               await getJson(
                 ZPOBLOG_BASE,
@@ -1093,7 +1089,6 @@ Autor und Beitragsdatum geladen.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -1121,7 +1116,6 @@ Zeichenbegrenzung gekürzt wurde.
 
           inputSchema:
             z.object({
-
               url:
                 z.string()
                   .min(5),
@@ -1145,9 +1139,7 @@ Zeichenbegrenzung gekürzt wurde.
           url,
           maxCharacters,
         }) => {
-
           try {
-
             const result =
               await getJson(
                 ZPOBLOG_BASE,
@@ -1164,7 +1156,6 @@ Zeichenbegrenzung gekürzt wurde.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -1200,7 +1191,6 @@ zu verifizieren.
 
           inputSchema:
             z.object({
-
               q:
                 z.string()
                   .min(1)
@@ -1240,9 +1230,7 @@ zu verifizieren.
           limit,
           offset,
         }) => {
-
           try {
-
             const result =
               await getJson(
                 BGHEUTE_BASE,
@@ -1262,7 +1250,6 @@ zu verifizieren.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -1289,7 +1276,6 @@ BGHeute ist ein privater Rechercheindex.
 
           inputSchema:
             z.object({
-
               query:
                 z.string()
                   .max(500)
@@ -1358,9 +1344,7 @@ BGHeute ist ein privater Rechercheindex.
           limit,
           offset,
         }) => {
-
           try {
-
             const result =
               await getJson(
                 BGHEUTE_BASE,
@@ -1386,7 +1370,6 @@ BGHeute ist ein privater Rechercheindex.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -1418,7 +1401,6 @@ heranzuziehen, soweit verfügbar.
 
           inputSchema:
             z.object({
-
               aktenzeichen:
                 z.string()
                   .min(2)
@@ -1443,9 +1425,7 @@ heranzuziehen, soweit verfügbar.
           aktenzeichen,
           maxCharacters,
         }) => {
-
           try {
-
             const result =
               await getJson(
                 BGHEUTE_BASE,
@@ -1491,7 +1471,6 @@ heranzuziehen, soweit verfügbar.
               )
 
             if (!exact) {
-
               return toolResult({
                 ok: false,
 
@@ -1524,7 +1503,6 @@ heranzuziehen, soweit verfügbar.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -1552,7 +1530,6 @@ Weitere Filter sollten möglichst gezielt verwendet werden.
 
           inputSchema:
             z.object({
-
               wahlperiode:
                 z.number()
                   .int()
@@ -1674,9 +1651,7 @@ Weitere Filter sollten möglichst gezielt verwendet werden.
           beratungsstand,
           cursor,
         }) => {
-
           try {
-
             if (!DIP_API_KEY) {
               throw new Error(
                 "DIP_API_KEY ist im MCP-Projekt nicht gesetzt.",
@@ -1752,7 +1727,6 @@ Weitere Filter sollten möglichst gezielt verwendet werden.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -1777,7 +1751,6 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
 
           inputSchema:
             z.object({
-
               id:
                 z.number()
                   .int()
@@ -1794,9 +1767,7 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
         async ({
           id,
         }) => {
-
           try {
-
             if (!DIP_API_KEY) {
               throw new Error(
                 "DIP_API_KEY ist im MCP-Projekt nicht gesetzt.",
@@ -1819,7 +1790,6 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -1845,7 +1815,6 @@ get_dip_drucksache_text anhand seiner DIP-ID abgerufen werden.
 
           inputSchema:
             z.object({
-
               wahlperiode:
                 z.number()
                   .int()
@@ -1945,9 +1914,7 @@ get_dip_drucksache_text anhand seiner DIP-ID abgerufen werden.
           vorgangstypNotation,
           cursor,
         }) => {
-
           try {
-
             if (!DIP_API_KEY) {
               throw new Error(
                 "DIP_API_KEY ist im MCP-Projekt nicht gesetzt.",
@@ -2011,7 +1978,6 @@ get_dip_drucksache_text anhand seiner DIP-ID abgerufen werden.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -2036,7 +2002,6 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
 
           inputSchema:
             z.object({
-
               id:
                 z.number()
                   .int()
@@ -2053,9 +2018,7 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
         async ({
           id,
         }) => {
-
           try {
-
             if (!DIP_API_KEY) {
               throw new Error(
                 "DIP_API_KEY ist im MCP-Projekt nicht gesetzt.",
@@ -2078,7 +2041,6 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -2106,7 +2068,6 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
 
           inputSchema:
             z.object({
-
               id:
                 z.number()
                   .int()
@@ -2131,9 +2092,7 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
           id,
           maxCharacters,
         }) => {
-
           try {
-
             if (!DIP_API_KEY) {
               throw new Error(
                 "DIP_API_KEY ist im MCP-Projekt nicht gesetzt.",
@@ -2159,7 +2118,6 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
@@ -2187,7 +2145,6 @@ Normfassung anhand einer amtlichen Quelle gegenzuprüfen.
 
           inputSchema:
             z.object({
-
               gesetz:
                 z.string()
                   .min(1)
@@ -2201,7 +2158,7 @@ Normfassung anhand einer amtlichen Quelle gegenzuprüfen.
                   .min(1)
                   .max(20)
                   .describe(
-                    "Paragraph, z. B. 139 oder 130a",
+                    "Paragraph oder Artikel, z. B. 139, 130a oder 44",
                   ),
 
               maxCharacters:
@@ -2224,9 +2181,7 @@ Normfassung anhand einer amtlichen Quelle gegenzuprüfen.
           paragraph,
           maxCharacters,
         }) => {
-
           try {
-
             const result =
               await fetchBuzerNorm(
                 gesetz,
@@ -2239,7 +2194,6 @@ Normfassung anhand einer amtlichen Quelle gegenzuprüfen.
             )
 
           } catch (error) {
-
             return toolError(
               error,
             )
