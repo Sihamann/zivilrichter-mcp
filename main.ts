@@ -3,78 +3,60 @@ import {
   McpServer,
 } from "npm:@modelcontextprotocol/server@2.0.0";
 
-import * as z from "npm:zod@4/v4";
+import * as z from "npm:zod@4";
+
+
+const LANDESRECHT_BASE =
+  "https://laend.sihamann.deno.net";
 
 
 // ============================================================
-// KONFIGURATION
-// ============================================================
-//
-// Hier tragen wir später die URLs Ihrer bereits vorhandenen
-// Deno-Proxys ein.
-//
-// Empfehlenswert: nicht fest in den Code schreiben, sondern
-// als Environment Variables in Deno Deploy hinterlegen.
-//
-// Beispiel:
-// LANDESRECHT_SEARCH_URL
-// https://.....deno.net/search
-//
-// LANDESRECHT_DOCUMENT_URL
-// https://.....deno.net/document
-//
-
-const LANDESRECHT_SEARCH_URL =
-  Deno.env.get("LANDESRECHT_SEARCH_URL") ?? "";
-
-const LANDESRECHT_DOCUMENT_URL =
-  Deno.env.get("LANDESRECHT_DOCUMENT_URL") ?? "";
-
-
-// ============================================================
-// HILFSFUNKTION
+// Hilfsfunktion für vorhandenen Landesrecht-BW-Proxy
 // ============================================================
 
-async function postJson(
-  url: string,
-  body: Record<string, unknown>,
+async function getJson(
+  path: string,
+  params: Record<string, string | number | undefined> = {},
 ): Promise<unknown> {
+  const url = new URL(path, LANDESRECHT_BASE);
 
-  if (!url) {
-    throw new Error(
-      "Proxy-URL ist noch nicht konfiguriert.",
-    );
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) {
+      url.searchParams.set(key, String(value));
+    }
   }
 
   const response = await fetch(url, {
-    method: "POST",
+    method: "GET",
     headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json",
+      Accept: "application/json",
     },
-    body: JSON.stringify(body),
     signal: AbortSignal.timeout(30000),
   });
 
   const text = await response.text();
 
-  if (!response.ok) {
+  let data: unknown;
+
+  try {
+    data = JSON.parse(text);
+  } catch {
     throw new Error(
-      `Proxy antwortete mit HTTP ${response.status}: ${text}`,
+      `Ungültige Antwort des Landesrecht-BW-Proxys: ${text}`,
     );
   }
 
-  try {
-    return JSON.parse(text);
-  } catch {
-    return {
-      rawText: text,
-    };
+  if (!response.ok) {
+    throw new Error(
+      `Landesrecht-BW-Proxy: HTTP ${response.status}: ${text}`,
+    );
   }
+
+  return data;
 }
 
 
-function asToolResult(data: unknown) {
+function toolResult(data: unknown) {
   return {
     content: [
       {
@@ -86,7 +68,7 @@ function asToolResult(data: unknown) {
 }
 
 
-function asToolError(error: unknown) {
+function toolError(error: unknown) {
   const message =
     error instanceof Error
       ? error.message
@@ -105,11 +87,10 @@ function asToolError(error: unknown) {
 
 
 // ============================================================
-// MCP SERVER
+// MCP Server
 // ============================================================
 
 const handler = createMcpHandler(() => {
-
   const server = new McpServer(
     {
       name: "zivilrichter-mcp",
@@ -117,42 +98,35 @@ const handler = createMcpHandler(() => {
     },
     {
       instructions: `
-Dieser MCP-Server stellt Recherchewerkzeuge für deutsches Recht
-und insbesondere deutsches Zivilprozessrecht bereit.
+Dieser MCP-Server stellt Recherchewerkzeuge für den
+Zivilrichter bereit.
 
-Suchtreffer und Trefferlisten dienen zunächst nur der Recherche.
+Trefferlisten und Snippets aus Landesrecht Baden-Württemberg
+dienen zunächst nur der Recherche.
 
-Soweit eine Gerichtsentscheidung tragend verwendet werden soll,
-ist nach Möglichkeit der Volltext abzurufen und zu prüfen.
+Soll eine Gerichtsentscheidung tragend verwendet werden,
+ist nach Möglichkeit anschließend der Volltext mit
+get_landesrecht_bw_document abzurufen.
 
-Bei Landesrecht Baden-Württemberg soll nach einer Suche ein
-relevanter Treffer mit get_landesrecht_bw_document vollständig
-abgerufen werden.
-
-Unsichere Fundstellen dürfen nicht als verifizierte Primärquelle
-behandelt werden.
+Gericht, Datum, Aktenzeichen und Entscheidungskontext sind
+vor einer tragenden Verwendung zu prüfen.
       `.trim(),
     },
   );
 
 
   // ==========================================================
-  // 1. PING
+  // 1. MCP-Funktionstest
   // ==========================================================
 
   server.registerTool(
     "ping",
     {
-      title: "Zivilrichter MCP testen",
-
       description:
-        "Prüft, ob der Zivilrichter-MCP-Server erreichbar und funktionsfähig ist.",
+        "Prüft, ob der Zivilrichter-MCP-Server erreichbar ist.",
 
       inputSchema: z.object({
-        text: z
-          .string()
-          .optional()
-          .describe("Optionaler Text für den Funktionstest"),
+        text: z.string().optional(),
       }),
 
       annotations: {
@@ -162,47 +136,72 @@ behandelt werden.
       },
     },
 
-    async ({ text }) => {
-      return {
-        content: [
-          {
-            type: "text",
-            text: text
-              ? `Zivilrichter MCP läuft. Eingabe: ${text}`
-              : "Zivilrichter MCP läuft.",
-          },
-        ],
-      };
+    async ({ text }) => ({
+      content: [
+        {
+          type: "text",
+          text: text
+            ? `Zivilrichter MCP läuft. Eingabe: ${text}`
+            : "Zivilrichter MCP läuft.",
+        },
+      ],
+    }),
+  );
+
+
+  // ==========================================================
+  // 2. Landesrecht-BW Healthcheck
+  // ==========================================================
+
+  server.registerTool(
+    "health_landesrecht_bw",
+    {
+      description:
+        "Prüft, ob der vorhandene Landesrecht-BW-Proxy erreichbar ist.",
+
+      inputSchema: z.object({}),
+
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+
+    async () => {
+      try {
+        const result = await getJson("/health");
+        return toolResult(result);
+      } catch (error) {
+        return toolError(error);
+      }
     },
   );
 
 
   // ==========================================================
-  // 2. LANDESRECHT BW SUCHEN
+  // 3. Landesrecht Baden-Württemberg durchsuchen
   // ==========================================================
 
   server.registerTool(
     "search_landesrecht_bw",
     {
-      title: "Landesrecht Baden-Württemberg durchsuchen",
-
       description: `
 Sucht in Landesrecht Baden-Württemberg nach Rechtsprechung,
 Gesetzen oder Verwaltungsvorschriften.
 
-Die Trefferliste dient der Recherche. Für eine tragende Aussage
-aus einer Gerichtsentscheidung soll anschließend der relevante
-Treffer mit get_landesrecht_bw_document im Volltext abgerufen
-werden.
+Für eine tragende Verwendung einer Gerichtsentscheidung soll
+anschließend der Volltext mit
+get_landesrecht_bw_document abgerufen werden.
       `.trim(),
 
       inputSchema: z.object({
-
         query: z
           .string()
           .min(1)
+          .max(500)
           .describe(
-            "Suchtext, zum Beispiel 'Beweiswürdigung Mietmangel'",
+            "Suchtext, z. B. '§ 139 ZPO' oder 'Beweiswürdigung Mietmangel'",
           ),
 
         category: z
@@ -214,7 +213,7 @@ werden.
           ])
           .default("all")
           .describe(
-            "Kategorie der Suche",
+            "Kategorie: all, Rechtsprechung, Gesetze oder VV",
           ),
 
         maxResults: z
@@ -224,7 +223,7 @@ werden.
           .max(20)
           .default(5)
           .describe(
-            "Maximale Zahl der Treffer pro Seite",
+            "Maximale Zahl der Treffer",
           ),
 
         page: z
@@ -251,11 +250,9 @@ werden.
       maxResults,
       page,
     }) => {
-
       try {
-
-        const result = await postJson(
-          LANDESRECHT_SEARCH_URL,
+        const result = await getJson(
+          "/search",
           {
             query,
             category,
@@ -264,48 +261,44 @@ werden.
           },
         );
 
-        return asToolResult(result);
-
+        return toolResult(result);
       } catch (error) {
-
-        return asToolError(error);
-
+        return toolError(error);
       }
     },
   );
 
 
   // ==========================================================
-  // 3. LANDESRECHT BW VOLLTEXT
+  // 4. Dokument aus Landesrecht BW abrufen
   // ==========================================================
 
   server.registerTool(
     "get_landesrecht_bw_document",
     {
-      title: "Landesrecht-BW-Dokument abrufen",
-
       description: `
-Ruft den Volltext eines zuvor über search_landesrecht_bw
-gefundenen Dokuments aus Landesrecht Baden-Württemberg ab.
+Ruft den Volltext eines zuvor mit search_landesrecht_bw
+gefundenen Dokuments ab.
 
-Die Dokument-ID und docPart müssen exakt aus dem Suchtreffer
-übernommen werden.
+id und docPart müssen aus dem Suchtreffer übernommen werden.
       `.trim(),
 
       inputSchema: z.object({
-
         id: z
           .string()
           .min(1)
+          .max(180)
           .describe(
-            "Dokument-ID aus dem Suchergebnis",
+            "Dokument-ID aus dem Suchtreffer",
           ),
 
         docPart: z
           .string()
           .min(1)
+          .max(8)
+          .default("L")
           .describe(
-            "docPart aus dem Suchergebnis, typischerweise L oder S",
+            "Dokumentteil aus dem Suchtreffer, häufig L",
           ),
 
         maxCharacters: z
@@ -315,7 +308,7 @@ Die Dokument-ID und docPart müssen exakt aus dem Suchtreffer
           .max(80000)
           .default(30000)
           .describe(
-            "Maximale Länge des abzurufenden Volltexts",
+            "Maximale Zahl zurückzugebender Zeichen",
           ),
       }),
 
@@ -331,11 +324,9 @@ Die Dokument-ID und docPart müssen exakt aus dem Suchtreffer
       docPart,
       maxCharacters,
     }) => {
-
       try {
-
-        const result = await postJson(
-          LANDESRECHT_DOCUMENT_URL,
+        const result = await getJson(
+          "/document",
           {
             id,
             docPart,
@@ -343,12 +334,9 @@ Die Dokument-ID und docPart müssen exakt aus dem Suchtreffer
           },
         );
 
-        return asToolResult(result);
-
+        return toolResult(result);
       } catch (error) {
-
-        return asToolError(error);
-
+        return toolError(error);
       }
     },
   );
@@ -357,9 +345,5 @@ Die Dokument-ID und docPart müssen exakt aus dem Suchtreffer
   return server;
 });
 
-
-// ============================================================
-// DENO DEPLOY
-// ============================================================
 
 export default handler;
