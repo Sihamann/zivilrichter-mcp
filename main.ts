@@ -73,6 +73,29 @@ function buildUrl(
 }
 
 
+function safeUrlForError(
+  url: URL,
+): string {
+  const safe =
+    new URL(
+      url.toString(),
+    )
+
+  if (
+    safe.searchParams.has(
+      "apikey",
+    )
+  ) {
+    safe.searchParams.set(
+      "apikey",
+      "[REDACTED]",
+    )
+  }
+
+  return safe.toString()
+}
+
+
 async function getJson(
   base: string,
   path: string,
@@ -123,14 +146,14 @@ async function getJson(
       JSON.parse(text)
   } catch {
     throw new Error(
-      `Ungültige JSON-Antwort von ${url.toString()}: ` +
+      `Ungültige JSON-Antwort von ${safeUrlForError(url)}: ` +
       text.slice(0, 1200),
     )
   }
 
   if (!response.ok) {
     throw new Error(
-      `HTTP ${response.status} von ${url.toString()}: ` +
+      `HTTP ${response.status} von ${safeUrlForError(url)}: ` +
       text.slice(0, 1800),
     )
   }
@@ -200,18 +223,6 @@ function zpoBlogHeaders():
   }
 }
 
-
-function dipHeaders():
-  Record<string, string> {
-  if (!DIP_API_KEY) {
-    return {}
-  }
-
-  return {
-    Authorization:
-      `ApiKey ${DIP_API_KEY}`,
-  }
-}
 
 
 // ============================================================
@@ -671,7 +682,7 @@ const handler =
               "zivilrichter-mcp",
 
             version:
-              "0.6.0",
+              "0.6.1",
           },
           {
             instructions: `
@@ -1718,8 +1729,10 @@ Weitere Filter sollten möglichst gezielt verwendet werden.
 
                   format:
                     "json",
+
+                  apikey:
+                    DIP_API_KEY,
                 },
-                dipHeaders(),
               )
 
             return toolResult(
@@ -1781,8 +1794,10 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
                 {
                   format:
                     "json",
+
+                  apikey:
+                    DIP_API_KEY,
                 },
-                dipHeaders(),
               )
 
             return toolResult(
@@ -1969,8 +1984,10 @@ get_dip_drucksache_text anhand seiner DIP-ID abgerufen werden.
 
                   format:
                     "json",
+
+                  apikey:
+                    DIP_API_KEY,
                 },
-                dipHeaders(),
               )
 
             return toolResult(
@@ -2032,8 +2049,10 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
                 {
                   format:
                     "json",
+
+                  apikey:
+                    DIP_API_KEY,
                 },
-                dipHeaders(),
               )
 
             return toolResult(
@@ -2106,8 +2125,10 @@ DIP ist eine amtliche Quelle des Deutschen Bundestages.
                 {
                   format:
                     "json",
+
+                  apikey:
+                    DIP_API_KEY,
                 },
-                dipHeaders(),
               )
 
             return toolResult(
