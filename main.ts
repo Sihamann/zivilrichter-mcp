@@ -9,16 +9,31 @@ import * as z from "npm:zod@4";
 const LANDESRECHT_BASE =
   "https://laend.sihamann.deno.net";
 
+const ZPOBLOG_BASE =
+  "https://100.sihamann.deno.net";
+
+
+// Falls Ihr ZPO-Blog-Proxy ACTION_API_KEY verwendet:
+// denselben Wert im MCP-Projekt als ZPOBLOG_API_KEY hinterlegen.
+const ZPOBLOG_API_KEY =
+  Deno.env.get("ZPOBLOG_API_KEY") ?? "";
+
 
 // ============================================================
-// Hilfsfunktion für vorhandenen Landesrecht-BW-Proxy
+// HTTP-Hilfsfunktion
 // ============================================================
 
 async function getJson(
+  base: string,
   path: string,
-  params: Record<string, string | number | undefined> = {},
+  params: Record<
+    string,
+    string | number | boolean | undefined
+  > = {},
+  headers: Record<string, string> = {},
 ): Promise<unknown> {
-  const url = new URL(path, LANDESRECHT_BASE);
+
+  const url = new URL(path, base);
 
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) {
@@ -30,6 +45,7 @@ async function getJson(
     method: "GET",
     headers: {
       Accept: "application/json",
+      ...headers,
     },
     signal: AbortSignal.timeout(30000),
   });
@@ -42,13 +58,13 @@ async function getJson(
     data = JSON.parse(text);
   } catch {
     throw new Error(
-      `Ungültige Antwort des Landesrecht-BW-Proxys: ${text}`,
+      `Ungültige JSON-Antwort von ${url}: ${text}`,
     );
   }
 
   if (!response.ok) {
     throw new Error(
-      `Landesrecht-BW-Proxy: HTTP ${response.status}: ${text}`,
+      `HTTP ${response.status} von ${url}: ${text}`,
     );
   }
 
@@ -86,37 +102,56 @@ function toolError(error: unknown) {
 }
 
 
+function zpoBlogHeaders(): Record<string, string> {
+  if (!ZPOBLOG_API_KEY) {
+    return {};
+  }
+
+  return {
+    "x-api-key": ZPOBLOG_API_KEY,
+  };
+}
+
+
 // ============================================================
-// MCP Server
+// MCP-SERVER
 // ============================================================
 
 const handler = createMcpHandler(() => {
+
   const server = new McpServer(
     {
       name: "zivilrichter-mcp",
-      version: "0.2.0",
+      version: "0.3.0",
     },
     {
       instructions: `
-Dieser MCP-Server stellt Recherchewerkzeuge für den
-Zivilrichter bereit.
+Dieser MCP-Server stellt Recherchewerkzeuge für deutsches Recht
+und insbesondere deutsches Zivilprozessrecht bereit.
 
-Trefferlisten und Snippets aus Landesrecht Baden-Württemberg
-dienen zunächst nur der Recherche.
+Quellen sind nach ihrem Quellenwert zu behandeln.
 
-Soll eine Gerichtsentscheidung tragend verwendet werden,
-ist nach Möglichkeit anschließend der Volltext mit
-get_landesrecht_bw_document abzurufen.
+Landesrecht Baden-Württemberg kann Primärtexte und amtliche
+beziehungsweise justizielle Inhalte bereitstellen.
 
-Gericht, Datum, Aktenzeichen und Entscheidungskontext sind
-vor einer tragenden Verwendung zu prüfen.
+Der ZPO-Blog ist eine praxisnahe Sekundärquelle. Aussagen daraus
+dürfen die Recherche und Argumentationsstruktur unterstützen,
+sollen aber für tragende Rechtsaussagen nach Möglichkeit anhand
+von Gesetz und Primärquellen gegengeprüft werden.
+
+Suchtreffer und Snippets allein sind nicht als vollständig
+verifizierter Entscheidungsinhalt zu behandeln.
+
+Bei Gerichtsentscheidungen sollen Gericht, Datum, Aktenzeichen
+und tragender Entscheidungskontext vor einer tragenden Verwendung
+geprüft werden.
       `.trim(),
     },
   );
 
 
   // ==========================================================
-  // 1. MCP-Funktionstest
+  // 1. PING
   // ==========================================================
 
   server.registerTool(
@@ -150,7 +185,7 @@ vor einer tragenden Verwendung zu prüfen.
 
 
   // ==========================================================
-  // 2. Landesrecht-BW Healthcheck
+  // LANDESRECHT BADEN-WÜRTTEMBERG
   // ==========================================================
 
   server.registerTool(
@@ -170,18 +205,19 @@ vor einer tragenden Verwendung zu prüfen.
 
     async () => {
       try {
-        const result = await getJson("/health");
+        const result = await getJson(
+          LANDESRECHT_BASE,
+          "/health",
+        );
+
         return toolResult(result);
+
       } catch (error) {
         return toolError(error);
       }
     },
   );
 
-
-  // ==========================================================
-  // 3. Landesrecht Baden-Württemberg durchsuchen
-  // ==========================================================
 
   server.registerTool(
     "search_landesrecht_bw",
@@ -196,13 +232,11 @@ get_landesrecht_bw_document abgerufen werden.
       `.trim(),
 
       inputSchema: z.object({
+
         query: z
           .string()
           .min(1)
-          .max(500)
-          .describe(
-            "Suchtext, z. B. '§ 139 ZPO' oder 'Beweiswürdigung Mietmangel'",
-          ),
+          .max(500),
 
         category: z
           .enum([
@@ -211,30 +245,21 @@ get_landesrecht_bw_document abgerufen werden.
             "Gesetze",
             "VV",
           ])
-          .default("all")
-          .describe(
-            "Kategorie: all, Rechtsprechung, Gesetze oder VV",
-          ),
+          .default("all"),
 
         maxResults: z
           .number()
           .int()
           .min(1)
           .max(20)
-          .default(5)
-          .describe(
-            "Maximale Zahl der Treffer",
-          ),
+          .default(5),
 
         page: z
           .number()
           .int()
           .min(1)
           .max(100)
-          .default(1)
-          .describe(
-            "Trefferseite",
-          ),
+          .default(1),
       }),
 
       annotations: {
@@ -250,8 +275,11 @@ get_landesrecht_bw_document abgerufen werden.
       maxResults,
       page,
     }) => {
+
       try {
+
         const result = await getJson(
+          LANDESRECHT_BASE,
           "/search",
           {
             query,
@@ -262,16 +290,13 @@ get_landesrecht_bw_document abgerufen werden.
         );
 
         return toolResult(result);
+
       } catch (error) {
         return toolError(error);
       }
     },
   );
 
-
-  // ==========================================================
-  // 4. Dokument aus Landesrecht BW abrufen
-  // ==========================================================
 
   server.registerTool(
     "get_landesrecht_bw_document",
@@ -284,32 +309,24 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
       `.trim(),
 
       inputSchema: z.object({
+
         id: z
           .string()
           .min(1)
-          .max(180)
-          .describe(
-            "Dokument-ID aus dem Suchtreffer",
-          ),
+          .max(180),
 
         docPart: z
           .string()
           .min(1)
           .max(8)
-          .default("L")
-          .describe(
-            "Dokumentteil aus dem Suchtreffer, häufig L",
-          ),
+          .default("L"),
 
         maxCharacters: z
           .number()
           .int()
           .min(1000)
           .max(80000)
-          .default(30000)
-          .describe(
-            "Maximale Zahl zurückzugebender Zeichen",
-          ),
+          .default(30000),
       }),
 
       annotations: {
@@ -324,8 +341,11 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
       docPart,
       maxCharacters,
     }) => {
+
       try {
+
         const result = await getJson(
+          LANDESRECHT_BASE,
           "/document",
           {
             id,
@@ -335,6 +355,213 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
         );
 
         return toolResult(result);
+
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+
+  // ==========================================================
+  // ZPO-BLOG
+  // ==========================================================
+
+  server.registerTool(
+    "health_zpo_blog",
+    {
+      description:
+        "Prüft, ob der vorhandene ZPO-Blog-Proxy erreichbar ist.",
+
+      inputSchema: z.object({}),
+
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+
+    async () => {
+
+      try {
+
+        const result = await getJson(
+          ZPOBLOG_BASE,
+          "/health",
+        );
+
+        return toolResult(result);
+
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+
+  server.registerTool(
+    "search_zpo_blog",
+    {
+      description: `
+Sucht über die offizielle ZPO-Blog-Suchseite des Anwaltsblatts.
+
+Der ZPO-Blog ist eine Sekundärquelle.
+
+Mit includeFullText=true werden zusätzlich Artikeltexte,
+Autor und Beitragsdatum geladen. Bei vielen Treffern kann dies
+deutlich aufwendiger sein.
+
+Für die erste Recherche regelmäßig mit mode="all" und wenigen
+Ergebnisseiten beginnen.
+      `.trim(),
+
+      inputSchema: z.object({
+
+        query: z
+          .string()
+          .min(2)
+          .max(500)
+          .describe(
+            "Suchbegriff oder mehrere Suchwörter",
+          ),
+
+        mode: z
+          .enum([
+            "all",
+            "any",
+            "or",
+            "literal",
+          ])
+          .default("all")
+          .describe(
+            "all = alle Wörter; any/or = mindestens eines; literal = genaue Wortfolge",
+          ),
+
+        maxPages: z
+          .number()
+          .int()
+          .min(1)
+          .max(5)
+          .default(2),
+
+        maxResults: z
+          .number()
+          .int()
+          .min(1)
+          .max(80)
+          .default(25),
+
+        includeFullText: z
+          .boolean()
+          .default(false),
+
+        maxFullTextCharacters: z
+          .number()
+          .int()
+          .min(1000)
+          .max(20000)
+          .default(8000),
+      }),
+
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+
+    async ({
+      query,
+      mode,
+      maxPages,
+      maxResults,
+      includeFullText,
+      maxFullTextCharacters,
+    }) => {
+
+      try {
+
+        const result = await getJson(
+          ZPOBLOG_BASE,
+          "/search",
+          {
+            query,
+            mode,
+            maxPages,
+            maxResults,
+            includeFullText,
+            maxFullTextCharacters,
+          },
+          zpoBlogHeaders(),
+        );
+
+        return toolResult(result);
+
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+
+  server.registerTool(
+    "get_zpo_blog_article",
+    {
+      description: `
+Ruft einen einzelnen ZPO-Blog-Beitrag ab.
+
+Die URL muss von anwaltsblatt.anwaltverein.de stammen und auf
+einen konkreten ZPO-Blog-Beitrag zeigen.
+
+Der Abruf liefert insbesondere Titel, Beitragsdatum, Autor,
+Schlagwörter und Text. truncated=true bedeutet, dass der
+zurückgegebene Text wegen der Zeichenbegrenzung gekürzt wurde.
+      `.trim(),
+
+      inputSchema: z.object({
+
+        url: z
+          .string()
+          .min(5)
+          .describe(
+            "Vollständige URL eines ZPO-Blog-Beitrags",
+          ),
+
+        maxCharacters: z
+          .number()
+          .int()
+          .min(1000)
+          .max(20000)
+          .default(8000),
+      }),
+
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+
+    async ({
+      url,
+      maxCharacters,
+    }) => {
+
+      try {
+
+        const result = await getJson(
+          ZPOBLOG_BASE,
+          "/article",
+          {
+            url,
+            maxCharacters,
+          },
+          zpoBlogHeaders(),
+        );
+
+        return toolResult(result);
+
       } catch (error) {
         return toolError(error);
       }
