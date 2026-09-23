@@ -6,21 +6,37 @@ import {
 import * as z from "npm:zod@4";
 
 
+// ============================================================
+// BASIS-URLS
+// ============================================================
+
 const LANDESRECHT_BASE =
   "https://laend.sihamann.deno.net";
 
 const ZPOBLOG_BASE =
   "https://100.sihamann.deno.net";
 
+const BGHEUTE_BASE =
+  "https://bgheute.de";
 
-// Falls Ihr ZPO-Blog-Proxy ACTION_API_KEY verwendet:
-// denselben Wert im MCP-Projekt als ZPOBLOG_API_KEY hinterlegen.
+
+// ============================================================
+// OPTIONAL: API-KEY ZPO-BLOG
+// ============================================================
+//
+// Nur erforderlich, wenn beim bestehenden ZPO-Blog-Proxy
+// ACTION_API_KEY gesetzt ist.
+//
+// Dann im MCP-Projekt:
+// ZPOBLOG_API_KEY = derselbe Wert
+//
+
 const ZPOBLOG_API_KEY =
   Deno.env.get("ZPOBLOG_API_KEY") ?? "";
 
 
 // ============================================================
-// HTTP-Hilfsfunktion
+// ALLGEMEINE HTTP-HILFSFUNKTION
 // ============================================================
 
 async function getJson(
@@ -31,7 +47,7 @@ async function getJson(
     string | number | boolean | undefined
   > = {},
   headers: Record<string, string> = {},
-): Promise<unknown> {
+): Promise<any> {
 
   const url = new URL(path, base);
 
@@ -52,25 +68,31 @@ async function getJson(
 
   const text = await response.text();
 
-  let data: unknown;
+  let data: any;
 
   try {
     data = JSON.parse(text);
   } catch {
     throw new Error(
-      `Ungültige JSON-Antwort von ${url}: ${text}`,
+      `Ungültige JSON-Antwort von ${url.toString()}: ` +
+      text.slice(0, 1000),
     );
   }
 
   if (!response.ok) {
     throw new Error(
-      `HTTP ${response.status} von ${url}: ${text}`,
+      `HTTP ${response.status} von ${url.toString()}: ` +
+      text.slice(0, 1500),
     );
   }
 
   return data;
 }
 
+
+// ============================================================
+// MCP-RÜCKGABEN
+// ============================================================
 
 function toolResult(data: unknown) {
   return {
@@ -85,6 +107,7 @@ function toolResult(data: unknown) {
 
 
 function toolError(error: unknown) {
+
   const message =
     error instanceof Error
       ? error.message
@@ -102,13 +125,131 @@ function toolError(error: unknown) {
 }
 
 
+// ============================================================
+// ZPO-BLOG AUTH
+// ============================================================
+
 function zpoBlogHeaders(): Record<string, string> {
+
   if (!ZPOBLOG_API_KEY) {
     return {};
   }
 
   return {
     "x-api-key": ZPOBLOG_API_KEY,
+  };
+}
+
+
+// ============================================================
+// BGH-DATEN AUFBEREITEN
+// ============================================================
+//
+// Wichtig:
+//
+// BGHeute enthält auch KI-generierte Zusammenfassungen.
+// Diese entfernen wir bewusst aus unseren Toolantworten.
+//
+// Für unsere richterliche Recherche sollen maßgeblich sein:
+// - Gericht / Senat
+// - Datum
+// - Aktenzeichen
+// - Originaltext
+// - amtliche bzw. Juris-URL
+//
+
+function slimBghDecision(
+  decision: any,
+  previewCharacters = 2000,
+) {
+
+  if (!decision || typeof decision !== "object") {
+    return decision;
+  }
+
+  const text =
+    typeof decision.urteilstext === "string"
+      ? decision.urteilstext
+      : "";
+
+  const {
+    urteilstext,
+    ai_summary,
+    ...rest
+  } = decision;
+
+  return {
+    ...rest,
+
+    urteilstextPreview:
+      text.length > previewCharacters
+        ? text.slice(0, previewCharacters) + "…"
+        : text,
+
+    urteilstextCharacters:
+      text.length,
+
+    urteilstextTruncated:
+      text.length > previewCharacters,
+  };
+}
+
+
+function slimBghPayload(data: any) {
+
+  if (!data || typeof data !== "object") {
+    return data;
+  }
+
+  if (!Array.isArray(data.decisions)) {
+    return data;
+  }
+
+  return {
+    ...data,
+
+    decisions:
+      data.decisions.map(
+        (decision: any) =>
+          slimBghDecision(decision),
+      ),
+  };
+}
+
+
+function fullBghDecision(
+  decision: any,
+  maxCharacters: number,
+) {
+
+  if (!decision || typeof decision !== "object") {
+    return decision;
+  }
+
+  const text =
+    typeof decision.urteilstext === "string"
+      ? decision.urteilstext
+      : "";
+
+  const {
+    urteilstext,
+    ai_summary,
+    ...rest
+  } = decision;
+
+  return {
+    ...rest,
+
+    urteilstext:
+      text.length > maxCharacters
+        ? text.slice(0, maxCharacters)
+        : text,
+
+    totalCharacters:
+      text.length,
+
+    truncated:
+      text.length > maxCharacters,
   };
 }
 
@@ -122,29 +263,35 @@ const handler = createMcpHandler(() => {
   const server = new McpServer(
     {
       name: "zivilrichter-mcp",
-      version: "0.3.0",
+      version: "0.4.0",
     },
     {
       instructions: `
-Dieser MCP-Server stellt Recherchewerkzeuge für deutsches Recht
-und insbesondere deutsches Zivilprozessrecht bereit.
+Dieser MCP-Server dient der juristischen Recherche für deutsches
+Recht und insbesondere deutsches Zivilprozessrecht.
 
 Quellen sind nach ihrem Quellenwert zu behandeln.
 
-Landesrecht Baden-Württemberg kann Primärtexte und amtliche
-beziehungsweise justizielle Inhalte bereitstellen.
+Landesrecht Baden-Württemberg kann amtliche beziehungsweise
+justizielle Primärtexte bereitstellen.
 
-Der ZPO-Blog ist eine praxisnahe Sekundärquelle. Aussagen daraus
-dürfen die Recherche und Argumentationsstruktur unterstützen,
-sollen aber für tragende Rechtsaussagen nach Möglichkeit anhand
-von Gesetz und Primärquellen gegengeprüft werden.
+BGHeute ist ein privater Rechercheindex für Entscheidungen des
+Bundesgerichtshofs. BGHeute dient zum Auffinden von Entscheidungen.
+KI-generierte Zusammenfassungen von BGHeute sollen nicht als
+Rechtsquelle verwendet werden und werden durch diesen MCP-Server
+nach Möglichkeit nicht ausgegeben.
+
+Für tragende Aussagen aus BGH-Entscheidungen sind Aktenzeichen,
+Datum, Senat, Volltext und nach Möglichkeit die amtliche BGH-
+beziehungsweise Juris-Quelle zu prüfen.
+
+Der ZPO-Blog ist eine praxisnahe Sekundärquelle. Er darf
+Recherche, Problemaufriss und Argumentationsstruktur unterstützen.
+Tragende Rechtsaussagen sind anhand von Gesetz und belastbaren
+Primärquellen gegenzuprüfen.
 
 Suchtreffer und Snippets allein sind nicht als vollständig
 verifizierter Entscheidungsinhalt zu behandeln.
-
-Bei Gerichtsentscheidungen sollen Gericht, Datum, Aktenzeichen
-und tragender Entscheidungskontext vor einer tragenden Verwendung
-geprüft werden.
       `.trim(),
     },
   );
@@ -161,7 +308,9 @@ geprüft werden.
         "Prüft, ob der Zivilrichter-MCP-Server erreichbar ist.",
 
       inputSchema: z.object({
-        text: z.string().optional(),
+        text: z
+          .string()
+          .optional(),
       }),
 
       annotations: {
@@ -185,7 +334,7 @@ geprüft werden.
 
 
   // ==========================================================
-  // LANDESRECHT BADEN-WÜRTTEMBERG
+  // 2. LANDESRECHT BW - HEALTH
   // ==========================================================
 
   server.registerTool(
@@ -204,7 +353,9 @@ geprüft werden.
     },
 
     async () => {
+
       try {
+
         const result = await getJson(
           LANDESRECHT_BASE,
           "/health",
@@ -213,11 +364,16 @@ geprüft werden.
         return toolResult(result);
 
       } catch (error) {
+
         return toolError(error);
       }
     },
   );
 
+
+  // ==========================================================
+  // 3. LANDESRECHT BW - SUCHE
+  // ==========================================================
 
   server.registerTool(
     "search_landesrecht_bw",
@@ -236,7 +392,10 @@ get_landesrecht_bw_document abgerufen werden.
         query: z
           .string()
           .min(1)
-          .max(500),
+          .max(500)
+          .describe(
+            "Suchtext",
+          ),
 
         category: z
           .enum([
@@ -292,11 +451,16 @@ get_landesrecht_bw_document abgerufen werden.
         return toolResult(result);
 
       } catch (error) {
+
         return toolError(error);
       }
     },
   );
 
+
+  // ==========================================================
+  // 4. LANDESRECHT BW - VOLLTEXT
+  // ==========================================================
 
   server.registerTool(
     "get_landesrecht_bw_document",
@@ -357,6 +521,7 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
         return toolResult(result);
 
       } catch (error) {
+
         return toolError(error);
       }
     },
@@ -364,7 +529,7 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
 
 
   // ==========================================================
-  // ZPO-BLOG
+  // 5. ZPO-BLOG - HEALTH
   // ==========================================================
 
   server.registerTool(
@@ -394,26 +559,30 @@ id und docPart müssen aus dem Suchtreffer übernommen werden.
         return toolResult(result);
 
       } catch (error) {
+
         return toolError(error);
       }
     },
   );
 
 
+  // ==========================================================
+  // 6. ZPO-BLOG - SUCHE
+  // ==========================================================
+
   server.registerTool(
     "search_zpo_blog",
     {
       description: `
-Sucht über die offizielle ZPO-Blog-Suchseite des Anwaltsblatts.
+Sucht über die ZPO-Blog-Suchfunktion des Anwaltsblatts.
 
 Der ZPO-Blog ist eine Sekundärquelle.
 
-Mit includeFullText=true werden zusätzlich Artikeltexte,
-Autor und Beitragsdatum geladen. Bei vielen Treffern kann dies
-deutlich aufwendiger sein.
+Für die erste Recherche regelmäßig mit mode="all" und ein bis
+zwei Ergebnisseiten beginnen.
 
-Für die erste Recherche regelmäßig mit mode="all" und wenigen
-Ergebnisseiten beginnen.
+Mit includeFullText=true werden zusätzlich Artikeltexte,
+Autor und Beitragsdatum geladen.
       `.trim(),
 
       inputSchema: z.object({
@@ -421,10 +590,7 @@ Ergebnisseiten beginnen.
         query: z
           .string()
           .min(2)
-          .max(500)
-          .describe(
-            "Suchbegriff oder mehrere Suchwörter",
-          ),
+          .max(500),
 
         mode: z
           .enum([
@@ -433,10 +599,7 @@ Ergebnisseiten beginnen.
             "or",
             "literal",
           ])
-          .default("all")
-          .describe(
-            "all = alle Wörter; any/or = mindestens eines; literal = genaue Wortfolge",
-          ),
+          .default("all"),
 
         maxPages: z
           .number()
@@ -499,11 +662,16 @@ Ergebnisseiten beginnen.
         return toolResult(result);
 
       } catch (error) {
+
         return toolError(error);
       }
     },
   );
 
+
+  // ==========================================================
+  // 7. ZPO-BLOG - ARTIKEL
+  // ==========================================================
 
   server.registerTool(
     "get_zpo_blog_article",
@@ -511,22 +679,21 @@ Ergebnisseiten beginnen.
       description: `
 Ruft einen einzelnen ZPO-Blog-Beitrag ab.
 
-Die URL muss von anwaltsblatt.anwaltverein.de stammen und auf
-einen konkreten ZPO-Blog-Beitrag zeigen.
+Die URL muss auf einen konkreten ZPO-Blog-Beitrag des
+Anwaltsblatts zeigen.
 
 Der Abruf liefert insbesondere Titel, Beitragsdatum, Autor,
-Schlagwörter und Text. truncated=true bedeutet, dass der
-zurückgegebene Text wegen der Zeichenbegrenzung gekürzt wurde.
+Schlagwörter und Text.
+
+truncated=true bedeutet, dass der Text wegen der vorgegebenen
+Zeichenbegrenzung gekürzt wurde.
       `.trim(),
 
       inputSchema: z.object({
 
         url: z
           .string()
-          .min(5)
-          .describe(
-            "Vollständige URL eines ZPO-Blog-Beitrags",
-          ),
+          .min(5),
 
         maxCharacters: z
           .number()
@@ -563,6 +730,351 @@ zurückgegebene Text wegen der Zeichenbegrenzung gekürzt wurde.
         return toolResult(result);
 
       } catch (error) {
+
+        return toolError(error);
+      }
+    },
+  );
+
+
+  // ==========================================================
+  // 8. BGH / BGHEUTE - VOLLTEXTSUCHE
+  // ==========================================================
+
+  server.registerTool(
+    "search_bgh_decisions",
+    {
+      description: `
+Sucht im privaten Rechercheindex BGHeute nach Entscheidungen des
+Bundesgerichtshofs.
+
+Geeignet für eine thematische Volltextsuche.
+
+BGHeute dient zum Auffinden einschlägiger Entscheidungen.
+KI-generierte Zusammenfassungen werden durch dieses Tool nicht
+ausgegeben.
+
+Eine relevante Entscheidung soll anschließend anhand des
+Aktenzeichens mit get_bgh_decision abgerufen werden.
+
+Für tragende Rechtsaussagen sind Aktenzeichen, Datum, Senat und
+Volltext sowie nach Möglichkeit die amtliche BGH-/Juris-Quelle
+zu verifizieren.
+      `.trim(),
+
+      inputSchema: z.object({
+
+        q: z
+          .string()
+          .min(1)
+          .max(500)
+          .describe(
+            "Suchbegriff oder Suchphrase",
+          ),
+
+        fields: z
+          .string()
+          .default(
+            "titel,urteilstext,aktenzeichen",
+          )
+          .describe(
+            "Kommagetrennte BGHeute-Suchfelder",
+          ),
+
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(10)
+          .default(5),
+
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .max(100000)
+          .default(0),
+      }),
+
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+
+    async ({
+      q,
+      fields,
+      limit,
+      offset,
+    }) => {
+
+      try {
+
+        const result = await getJson(
+          BGHEUTE_BASE,
+          "/api/decisions/search",
+          {
+            q,
+            fields,
+            limit,
+            offset,
+          },
+        );
+
+        return toolResult(
+          slimBghPayload(result),
+        );
+
+      } catch (error) {
+
+        return toolError(error);
+      }
+    },
+  );
+
+
+  // ==========================================================
+  // 9. BGH / BGHEUTE - STRUKTURIERTE SUCHE
+  // ==========================================================
+
+  server.registerTool(
+    "find_bgh_decisions",
+    {
+      description: `
+Filtert Entscheidungen des Bundesgerichtshofs über BGHeute.
+
+Geeignet insbesondere für eine Suche nach Senat, Zeitraum,
+Aktenzeichen oder zusätzlichem Suchbegriff.
+
+BGHeute ist ein privater Rechercheindex. Die Treffer dienen
+zunächst dem Auffinden der Entscheidung.
+      `.trim(),
+
+      inputSchema: z.object({
+
+        query: z
+          .string()
+          .max(500)
+          .optional(),
+
+        senat: z
+          .string()
+          .max(200)
+          .optional()
+          .describe(
+            "Senat, z. B. V. Zivilsenat",
+          ),
+
+        aktenzeichen: z
+          .string()
+          .max(100)
+          .optional(),
+
+        startDate: z
+          .string()
+          .max(10)
+          .optional()
+          .describe(
+            "YYYY-MM-DD",
+          ),
+
+        endDate: z
+          .string()
+          .max(10)
+          .optional()
+          .describe(
+            "YYYY-MM-DD",
+          ),
+
+        sort: z
+          .enum([
+            "date_desc",
+            "date_asc",
+            "lesezeit_asc",
+            "lesezeit_desc",
+          ])
+          .default("date_desc"),
+
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(20)
+          .default(5),
+
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .max(100000)
+          .default(0),
+      }),
+
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+
+    async ({
+      query,
+      senat,
+      aktenzeichen,
+      startDate,
+      endDate,
+      sort,
+      limit,
+      offset,
+    }) => {
+
+      try {
+
+        const result = await getJson(
+          BGHEUTE_BASE,
+          "/api/decisions",
+          {
+            query,
+            senat,
+            aktenzeichen,
+            start_date: startDate,
+            end_date: endDate,
+            sort,
+            limit,
+            offset,
+          },
+        );
+
+        return toolResult(
+          slimBghPayload(result),
+        );
+
+      } catch (error) {
+
+        return toolError(error);
+      }
+    },
+  );
+
+
+  // ==========================================================
+  // 10. BGH / BGHEUTE - EINZELENTSCHEIDUNG
+  // ==========================================================
+
+  server.registerTool(
+    "get_bgh_decision",
+    {
+      description: `
+Ruft eine konkrete BGH-Entscheidung anhand ihres Aktenzeichens
+über BGHeute ab.
+
+Das Tool verwendet zunächst den BGHeute-Aktenzeichenfilter und
+prüft anschließend auf exakte Übereinstimmung.
+
+KI-generierte Zusammenfassungen werden nicht ausgegeben.
+
+Für eine tragende Verwendung ist insbesondere die im Datensatz
+enthaltene amtliche BGH-/Juris-URL zur Verifikation heranzuziehen,
+soweit verfügbar.
+      `.trim(),
+
+      inputSchema: z.object({
+
+        aktenzeichen: z
+          .string()
+          .min(2)
+          .max(100)
+          .describe(
+            "Aktenzeichen, z. B. VIII ZR 270/14",
+          ),
+
+        maxCharacters: z
+          .number()
+          .int()
+          .min(1000)
+          .max(100000)
+          .default(30000),
+      }),
+
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+
+    async ({
+      aktenzeichen,
+      maxCharacters,
+    }) => {
+
+      try {
+
+        const result = await getJson(
+          BGHEUTE_BASE,
+          "/api/decisions",
+          {
+            aktenzeichen,
+            limit: 20,
+            offset: 0,
+          },
+        );
+
+        const decisions =
+          Array.isArray(result?.decisions)
+            ? result.decisions
+            : [];
+
+        const normalizeAz =
+          (value: unknown) =>
+            String(value ?? "")
+              .trim()
+              .replace(/\s+/g, " ")
+              .toLowerCase();
+
+        const wanted =
+          normalizeAz(aktenzeichen);
+
+        const exact =
+          decisions.find(
+            (decision: any) =>
+              normalizeAz(
+                decision?.aktenzeichen,
+              ) === wanted,
+          );
+
+        if (!exact) {
+
+          return toolResult({
+            ok: false,
+
+            error:
+              "Keine Entscheidung mit exakt diesem Aktenzeichen gefunden.",
+
+            searchedAktenzeichen:
+              aktenzeichen,
+
+            candidates:
+              decisions
+                .slice(0, 5)
+                .map(
+                  (decision: any) =>
+                    slimBghDecision(decision),
+                ),
+          });
+        }
+
+        return toolResult(
+          fullBghDecision(
+            exact,
+            maxCharacters,
+          ),
+        );
+
+      } catch (error) {
+
         return toolError(error);
       }
     },
@@ -572,5 +1084,9 @@ zurückgegebene Text wegen der Zeichenbegrenzung gekürzt wurde.
   return server;
 });
 
+
+// ============================================================
+// DENO DEPLOY
+// ============================================================
 
 export default handler;
